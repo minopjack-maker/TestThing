@@ -4,10 +4,11 @@ using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using System.Net.Http.Json;
 
+// --- App + Config ---
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseUrls("http://0.0.0.0:8080");
 
-// --- CORS setup ---
+// --- CORS ---
 builder.Services.AddCors(o =>
 {
     o.AddPolicy("AllowNetlify", p =>
@@ -19,26 +20,20 @@ builder.Services.AddCors(o =>
         .AllowAnyHeader());
 });
 
-// --- SQLite DB ---
+// --- DB ---
 builder.Services.AddDbContext<VisitDbContext>(opt =>
     opt.UseSqlite("Data Source=visitortracker.db"));
 
-// ✅ Build the app here
 var app = builder.Build();
 
-// --- Middleware ---
+// --- Middleware setup ---
 app.UseCors("AllowNetlify");
 app.UseForwardedHeaders(new ForwardedHeadersOptions
 {
     ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
 });
-app.UseDefaultFiles();
-app.UseStaticFiles();
 
-// --- Ensure DB exists ---
-using (var scope = app.Services.CreateScope())
-    scope.ServiceProvider.GetRequiredService<VisitDbContext>().Database.EnsureCreated();
-
+// --- Helper: hash or anonymize IP ---
 static string TruncateOrHashIp(string? ip, bool hash = true)
 {
     if (string.IsNullOrEmpty(ip)) return "";
@@ -51,13 +46,80 @@ static string TruncateOrHashIp(string? ip, bool hash = true)
     return Convert.ToHexString(sha.ComputeHash(Encoding.UTF8.GetBytes(ip)))[..8];
 }
 
-// --- Root ---
-app.MapGet("/", () => Results.Text("✅ Visitor Tracker is running"));
+// --- Ensure DB exists ---
+using (var scope = app.Services.CreateScope())
+    scope.ServiceProvider.GetRequiredService<VisitDbContext>().Database.EnsureCreated();
 
-// --- Health check ---
+// ================================================================
+// 🌍 UNIVERSAL REQUEST LOGGER
+// ================================================================
+app.Use(async (ctx, next) =>
+{
+    var db = ctx.RequestServices.GetRequiredService<VisitDbContext>();
+
+    string? ip = ctx.Connection.RemoteIpAddress?.ToString();
+    if (ctx.Request.Headers.TryGetValue("X-Forwarded-For", out var xff))
+    {
+        var first = xff.ToString().Split(',')[0].Trim();
+        if (!string.IsNullOrEmpty(first))
+            ip = first;
+    }
+
+    string ua = ctx.Request.Headers["User-Agent"].ToString();
+    string lang = ctx.Request.Headers["Accept-Language"].ToString();
+    string method = ctx.Request.Method;
+    string path = ctx.Request.Path.ToString();
+
+    // --- Capture small request body text (optional) ---
+    string? bodyText = null;
+    if (ctx.Request.ContentLength is > 0 && ctx.Request.ContentLength < 2048)
+    {
+        ctx.Request.EnableBuffering();
+        using var reader = new StreamReader(ctx.Request.Body, Encoding.UTF8, leaveOpen: true);
+        bodyText = await reader.ReadToEndAsync();
+        ctx.Request.Body.Position = 0;
+    }
+
+    string? country = null, city = null, isp = null;
+    try
+    {
+        using var http = new HttpClient();
+        var geo = await http.GetFromJsonAsync<dynamic>($"https://ipapi.co/{ip}/json/");
+        country = (string?)geo?.country_name;
+        city = (string?)geo?.city;
+        isp = (string?)geo?.org;
+    }
+    catch { /* ignore if offline or rate-limited */ }
+
+    var visit = new Visit
+    {
+        TimestampUtc = DateTime.UtcNow,
+        Ip = TruncateOrHashIp(ip, hash: true),
+        Path = $"{method} {path}",
+        UserAgent = ua,
+        Language = lang,
+        Country = country,
+        City = city,
+        Isp = isp,
+        Extra = bodyText
+    };
+
+    db.Visits.Add(visit);
+    await db.SaveChangesAsync();
+
+    Console.WriteLine($"[Log] {visit.TimestampUtc:u} {visit.Ip} {visit.Country}/{visit.City} {visit.Path}");
+
+    await next();
+});
+
+// --- Static files (frontend) ---
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
+// --- Endpoints ---
+app.MapGet("/", () => Results.Text("✅ Visitor Tracker is running"));
 app.MapGet("/health", () => Results.Json(new { ok = true, time = DateTime.UtcNow }));
 
-// --- Log visit ---
 app.MapPost("/track-visit", async (HttpContext ctx, VisitDbContext db) =>
 {
     string? ip = ctx.Connection.RemoteIpAddress?.ToString();
@@ -79,10 +141,11 @@ app.MapPost("/track-visit", async (HttpContext ctx, VisitDbContext db) =>
         city = (string?)geo?.city;
         isp = (string?)geo?.org;
     }
-    catch { /* ignore if offline or rate-limited */ }
+    catch { }
 
     var visit = new Visit
     {
+        TimestampUtc = DateTime.UtcNow,
         Ip = TruncateOrHashIp(ip, hash: true),
         Path = ctx.Request.Path,
         UserAgent = ua,
@@ -99,18 +162,16 @@ app.MapPost("/track-visit", async (HttpContext ctx, VisitDbContext db) =>
     return Results.NoContent();
 });
 
-// --- List visits ---
 app.MapGet("/visits", async (VisitDbContext db) =>
 {
     var list = await db.Visits
         .OrderByDescending(v => v.TimestampUtc)
-        .Take(50)
+        .Take(100)
         .ToListAsync();
 
     return Results.Json(list);
 });
 
-// --- Cleanup old records (30 days) ---
 app.MapGet("/cleanup", async (VisitDbContext db) =>
 {
     var cutoff = DateTime.UtcNow.AddDays(-30);
@@ -121,3 +182,26 @@ app.MapGet("/cleanup", async (VisitDbContext db) =>
 });
 
 app.Run();
+
+// ================================================================
+// 📘 DATA CONTEXT + MODEL
+// ================================================================
+class VisitDbContext : DbContext
+{
+    public VisitDbContext(DbContextOptions<VisitDbContext> opt) : base(opt) { }
+    public DbSet<Visit> Visits => Set<Visit>();
+}
+
+class Visit
+{
+    public int Id { get; set; }
+    public DateTime TimestampUtc { get; set; } = DateTime.UtcNow;
+    public string? Ip { get; set; }
+    public string? Path { get; set; }
+    public string? UserAgent { get; set; }
+    public string? Language { get; set; }
+    public string? Country { get; set; }
+    public string? City { get; set; }
+    public string? Isp { get; set; }
+    public string? Extra { get; set; }   // <- request body or other data
+}
