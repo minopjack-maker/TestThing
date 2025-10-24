@@ -1,0 +1,134 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>👀 SUS Dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<style>
+  :root{--bg:#040406;--accent:#ff3b3b;--muted:#9b9b9b}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:linear-gradient(180deg,#05050a 0%,#0a0a12 100%);color:#fff;margin:0;padding:28px}
+  h1{color:var(--accent);margin:0 0 8px;font-size:34px}
+  p.m{color:var(--muted);margin:0 0 18px}
+  .panel{background:#071021;padding:18px;border-radius:12px;max-width:920px}
+  label{display:block;margin:10px 0 6px;color:var(--muted);font-size:13px}
+  input,select{padding:8px 10px;border-radius:8px;border:none;background:#0c1220;color:#fff}
+  button{margin-top:12px;padding:10px 14px;border-radius:8px;border:none;background:var(--accent);color:#111;font-weight:700;cursor:pointer}
+  button.stop{background:#333;color:#fff}
+  .muted{color:var(--muted);font-size:13px;margin-top:8px}
+  .log{margin-top:12px;background:#020313;padding:10px;border-radius:8px;height:200px;overflow:auto;font-family:monospace;font-size:13px}
+  .controls{display:flex;gap:12px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+  <h1>👀 SUS Dashboard</h1>
+  <p class="m">Controlled test pings to your own tracker — safe, slow, and configurable. Use only against your server.</p>
+
+  <div class="panel">
+    <div class="controls">
+      <div>
+        <label for="endpoint">Endpoint (must be same-origin or your Render URL)</label>
+        <input id="endpoint" value="/track-visit" style="width:320px"/>
+      </div>
+
+      <div>
+        <label for="interval">Interval (seconds) — min 1s</label>
+        <input id="interval" type="number" min="1" value="10" />
+      </div>
+
+      <div>
+        <label for="jitter">Random jitter (seconds max)</label>
+        <input id="jitter" type="number" min="0" value="5" />
+      </div>
+
+      <div>
+        <label for="token">Optional Test Token (leave blank unless server expects it)</label>
+        <input id="token" placeholder="secret-token" />
+      </div>
+    </div>
+
+    <div style="margin-top:14px;">
+      <button id="startBtn">Start</button>
+      <button id="stopBtn" class="stop" disabled>Stop</button>
+      <span class="muted">Each click sends one request immediately. Start will loop requests at the chosen interval.</span>
+    </div>
+
+    <div class="log" id="log"></div>
+  </div>
+
+<script>
+(() => {
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn  = document.getElementById('stopBtn');
+  const endpointInput = document.getElementById('endpoint');
+  const intervalInput = document.getElementById('interval');
+  const jitterInput   = document.getElementById('jitter');
+  const tokenInput    = document.getElementById('token');
+  const logEl = document.getElementById('log');
+
+  let timer = null;
+  let running = false;
+
+  function log(msg) {
+    const time = new Date().toLocaleTimeString();
+    logEl.innerHTML = `[${time}] ${msg}\n` + logEl.innerHTML;
+  }
+
+  async function sendOnce() {
+    const endpoint = endpointInput.value.trim() || '/track-visit';
+    const token = tokenInput.value.trim();
+
+    try {
+      const resp = await fetch(endpoint, {
+        method: 'POST',
+        headers: Object.assign({
+          'Content-Type': 'application/json'
+        }, token ? { 'X-Test-Token': token } : {}),
+        body: JSON.stringify({ path: location.pathname, note: "sus-test" })
+      });
+
+      log(`→ ${endpoint} ${resp.status} ${resp.statusText}`);
+    } catch (err) {
+      log(`⚠️ request failed: ${err}`);
+    }
+  }
+
+  function scheduleNext() {
+    const base = Math.max(1, Number(intervalInput.value) || 10) * 1000;
+    const jitter = Math.max(0, Number(jitterInput.value) || 0) * 1000;
+    const extra = jitter ? Math.floor(Math.random()*jitter) : 0;
+    const delay = base + extra;
+
+    timer = setTimeout(async () => {
+      await sendOnce();
+      if (running) scheduleNext();
+    }, delay);
+    log(`Scheduled next in ${Math.round(delay/1000)}s`);
+  }
+
+  startBtn.addEventListener('click', async () => {
+    if (running) return;
+    running = true;
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    log('Started loop');
+    await sendOnce();   // send immediate first ping
+    scheduleNext();
+  });
+
+  stopBtn.addEventListener('click', () => {
+    running = false;
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    if (timer) { clearTimeout(timer); timer = null; }
+    log('Stopped loop');
+  });
+
+  endpointInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { sendOnce(); }
+  });
+
+  log("Ready — press Start to begin. Default: 1 request every 10s with up to 5s jitter.");
+})();
+</script>
+</body>
+</html>
