@@ -1,0 +1,9 @@
+@VisitorTracker.Server_HostAddress = http://localhost:8080
+
+### Test tracking endpoint
+POST {{VisitorTracker.Server_HostAddress}}/track-visit
+Content-Type: application/json
+
+{
+  "path": "/"
+}
