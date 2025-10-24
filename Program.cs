@@ -51,12 +51,13 @@ using (var scope = app.Services.CreateScope())
     scope.ServiceProvider.GetRequiredService<VisitDbContext>().Database.EnsureCreated();
 
 // ================================================================
-// 🌍 UNIVERSAL REQUEST LOGGER
+// 🌍 UNIVERSAL REQUEST LOGGER (with visitor cookie)
 // ================================================================
 app.Use(async (ctx, next) =>
 {
     var db = ctx.RequestServices.GetRequiredService<VisitDbContext>();
 
+    // --- Determine IP (respect X-Forwarded-For if present) ---
     string? ip = ctx.Connection.RemoteIpAddress?.ToString();
     if (ctx.Request.Headers.TryGetValue("X-Forwarded-For", out var xff))
     {
@@ -70,6 +71,23 @@ app.Use(async (ctx, next) =>
     string method = ctx.Request.Method;
     string path = ctx.Request.Path.ToString();
 
+    // --- VISITOR COOKIE: set server-side if missing ---
+    const string CookieName = "visitorId";
+    string visitorId;
+    if (!ctx.Request.Cookies.TryGetValue(CookieName, out visitorId) || string.IsNullOrWhiteSpace(visitorId))
+    {
+        visitorId = Guid.NewGuid().ToString("N"); // no-dashes
+        var cookieOptions = new CookieOptions
+        {
+            HttpOnly = true,
+            Secure = true,           // <-- set to false for local HTTP testing only
+            SameSite = SameSiteMode.Lax,
+            Path = "/",
+            Expires = DateTimeOffset.UtcNow.AddYears(2)
+        };
+        ctx.Response.Cookies.Append(CookieName, visitorId, cookieOptions);
+    }
+
     // --- Capture small request body text (optional) ---
     string? bodyText = null;
     if (ctx.Request.ContentLength is > 0 && ctx.Request.ContentLength < 2048)
@@ -80,6 +98,7 @@ app.Use(async (ctx, next) =>
         ctx.Request.Body.Position = 0;
     }
 
+    // --- Geo lookup (best-effort) ---
     string? country = null, city = null, isp = null;
     try
     {
@@ -91,6 +110,14 @@ app.Use(async (ctx, next) =>
     }
     catch { /* ignore if offline or rate-limited */ }
 
+    // --- Short hashed form of visitorId for DB (avoid storing raw visitorId) ---
+    string? hashedVisitor = null;
+    if (!string.IsNullOrEmpty(visitorId))
+    {
+        using var sha = SHA256.Create();
+        hashedVisitor = Convert.ToHexString(sha.ComputeHash(Encoding.UTF8.GetBytes(visitorId)))[..8];
+    }
+
     var visit = new Visit
     {
         TimestampUtc = DateTime.UtcNow,
@@ -101,13 +128,13 @@ app.Use(async (ctx, next) =>
         Country = country,
         City = city,
         Isp = isp,
-        Extra = bodyText
+        Extra = hashedVisitor ?? bodyText // store hashed visitorId (preferred); fallback to bodyText if needed
     };
 
     db.Visits.Add(visit);
     await db.SaveChangesAsync();
 
-    Console.WriteLine($"[Log] {visit.TimestampUtc:u} {visit.Ip} {visit.Country}/{visit.City} {visit.Path}");
+    Console.WriteLine($"[Log] {visit.TimestampUtc:u} {visit.Ip} {visit.Country}/{visit.City} {visit.Path} visitor={hashedVisitor}");
 
     await next();
 });
@@ -203,5 +230,5 @@ class Visit
     public string? Country { get; set; }
     public string? City { get; set; }
     public string? Isp { get; set; }
-    public string? Extra { get; set; }   // <- request body or other data
+    public string? Extra { get; set; }   // <- hashed visitorId or request body
 }
