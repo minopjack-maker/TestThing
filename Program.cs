@@ -4,22 +4,10 @@ using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using System.Net.Http.Json;
 
-
-
-app.UseCors("AllowNetlify");
-app.UseForwardedHeaders(new ForwardedHeadersOptions
-{
-    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
-});
-
-// serve static files from wwwroot
-app.UseDefaultFiles();
-app.UseStaticFiles();
-
-
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseUrls("http://0.0.0.0:8080");
 
+// --- CORS setup ---
 builder.Services.AddCors(o =>
 {
     o.AddPolicy("AllowNetlify", p =>
@@ -31,18 +19,23 @@ builder.Services.AddCors(o =>
         .AllowAnyHeader());
 });
 
-// SQLite DB
+// --- SQLite DB ---
 builder.Services.AddDbContext<VisitDbContext>(opt =>
     opt.UseSqlite("Data Source=visitortracker.db"));
 
+// ✅ Build the app here
 var app = builder.Build();
-app.UseCors("AllowNetlify");
 
+// --- Middleware ---
+app.UseCors("AllowNetlify");
 app.UseForwardedHeaders(new ForwardedHeadersOptions
 {
     ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
 });
+app.UseDefaultFiles();
+app.UseStaticFiles();
 
+// --- Ensure DB exists ---
 using (var scope = app.Services.CreateScope())
     scope.ServiceProvider.GetRequiredService<VisitDbContext>().Database.EnsureCreated();
 
